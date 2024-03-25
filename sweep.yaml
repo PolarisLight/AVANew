@@ -1,0 +1,25 @@
+program: sweep_clip.py
+method: random
+metric:
+  goal: minimize
+  name: val_loss
+parameter:
+  hyperparameter_name0:
+    value: 0  
+  hyperparameter_name1: 
+    values: [0, 0, 0]
+  hyperparameter_name: 
+    distribution: <insert>
+    value: <insert>
+  hyperparameter_name2:  
+    distribution: <insert>
+    min: <insert>
+    max: <insert>
+    q: <insert>
+  hyperparameter_name3: 
+    distribution: <insert>
+    values:
+      - <list_of_values>
+      - <list_of_values>
+      - <list_of_values>
+
