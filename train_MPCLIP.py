@@ -1,20 +1,18 @@
 import os
 import torch
-import torch.nn as nn
-import torchvision
 import argparse
 
 import numpy as np
-from vit_pytorch import ViT
-from utils.dataset import AVADataset
-from utils.loss import emd_loss, dis_2_score, SupCon, SupCRLoss
+from utils.dataset import AVADatasetMP
+from utils.loss import emd_loss, dis_2_score, MPEMDLoss
+from utils.models import AesClipMP
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import accuracy_score
 import wandb
 import random
-from transformers import CLIPVisionModel, CLIPVisionConfig, AutoProcessor
+import platform
 
 os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
@@ -34,14 +32,15 @@ set_seed(seed)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 arg = argparse.ArgumentParser()
-arg.add_argument("-n", "--task_name", required=False, default="CLIP-3407-bs64-0.1new_scr", type=str, help="task name")
+arg.add_argument("-n", "--task_name", required=False, default="MPCLIP-3407-bs64-SGD", type=str, help="task name")
 arg.add_argument("--batch_size", type=int, default=64)
-arg.add_argument("--epoch", type=int, default=20)
-arg.add_argument("--lr_clip", type=float, default=3e-6)
-arg.add_argument("--lr_proj", type=float, default=3e-4)
+arg.add_argument("--epoch", type=int, default=40)
+arg.add_argument("--lr_clip", type=float, default=3e-5)
+arg.add_argument("--lr_proj", type=float, default=3e-3)
+arg.add_argument("--patch_num", type=int, default=5)
 arg.add_argument("-d", "--image_dir", required=False, default="D:\\Dataset\\AVA\\images", help="image dir")
 arg.add_argument("-c", "--csv_dir", required=False, default="D:\\Dataset\\AVA\\labels", help="csv dir")
-arg.add_argument("-w", "--use_wandb", required=False, type=int, default=0, help="use wandb or not")
+arg.add_argument("-w", "--use_wandb", required=False, type=int, default=1, help="use wandb or not")
 opt = vars(arg.parse_args())
 
 # Hyperparameters
@@ -54,49 +53,35 @@ imgsz = 224
 num_workers = 8 if opt['use_wandb'] else 0
 
 
-class AesClip(nn.Module):
-    def __init__(self):
-        super(AesClip, self).__init__()
-        self.clip = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
-        self.proj = nn.Sequential(
-            nn.Dropout(p=0.1),
-            nn.Linear(768, num_classes),
-            nn.Softmax(dim=1)
-        )
-
-    def forward(self, x):
-        x = self.clip(x)
-        self.feature = x.pooler_output
-        return self.proj(x.pooler_output)
-
-
 def main():
     # Load Data
-    train_dataset = AVADataset(csv_file=os.path.normpath(os.path.join(opt['csv_dir'], 'train_labels.csv')),
-                               root_dir=os.path.normpath(opt['image_dir']), imgsz=imgsz, device=device, train=True)
+    train_dataset = AVADatasetMP(csv_file=os.path.normpath(os.path.join(opt['csv_dir'], 'train_labels.csv')),
+                                 root_dir=os.path.normpath(opt['image_dir']), imgsz=imgsz, device=device, train=True,
+                                 patch_num=opt['patch_num'])
     train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
-    val_dataset = AVADataset(csv_file=os.path.normpath(os.path.join(opt['csv_dir'], 'val_labels.csv')),
-                             root_dir=os.path.normpath(opt['image_dir']),
-                             imgsz=imgsz, device=device, train=False)
+    val_dataset = AVADatasetMP(csv_file=os.path.normpath(os.path.join(opt['csv_dir'], 'val_labels.csv')),
+                               root_dir=os.path.normpath(opt['image_dir']),
+                               imgsz=imgsz, device=device, train=False, patch_num=opt['patch_num'])
     val_loader = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Model
     # config = CLIPVisionConfig(projection_dim=num_classes)
     # model = CLIPVisionModel(config).cuda()
-    model = AesClip().to(device)
+    model = AesClipMP().to(device)
+    if platform.system() == "Linux":
+        model = torch.compile(model)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total number of parameters: {total_params}")
 
     # Loss and optimizer
-    criterion = emd_loss()
-    # scl = SupCon(temperature=0.07)
-    scl = SupCRLoss(temperature=2.0)
+    criterion = MPEMDLoss()
+    criterion_val = emd_loss()
 
-    optimizer = torch.optim.Adam([{"params": model.clip.parameters(), "lr": LR_CLIP},
-                                  {"params": model.proj.parameters(), "lr": LR_PROJ}])
-    ls_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=5, gamma=0.1)
+    optimizer = torch.optim.SGD([{"params": model.clip.parameters(), "lr": LR_CLIP},
+                                   {"params": model.proj.parameters(), "lr": LR_PROJ}])
+    ls_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=5, gamma=0.7)
 
     best_acc = 0.0
     early_stop = 0
@@ -105,31 +90,18 @@ def main():
     for epoch in range(num_epochs):
         model.train()
         torch.cuda.empty_cache()
-
         with tqdm(train_loader, unit="batch") as tepoch:
             for i, data in enumerate(tepoch):
                 inputs, labels = data['image'], data['annotations']
                 inputs, labels = inputs.to(device), labels.to(device)
 
-                # Forward
-                # outputs = model(inputs)
-                # inputs = feature_extractor(images=inputs, return_tensors="pt")
-                # inputs = {"pixel_values": inputs}
                 outputs = model(inputs)
-
-                # outputs = model(inputs)
-                loss_emd = criterion(outputs, labels)
-                # labels_score = dis_2_score(labels, return_numpy=False)
-                # labels_class = labels_score > 5.00
-                # loss_scl = scl(model.feature, labels_score)
-
-                loss = loss_emd  # + 0.1 * loss_scl
+                loss = criterion(outputs, labels)
 
                 # Backward
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
                 tepoch.set_postfix(loss=loss.item())
                 if i % 100 == 0 and opt['use_wandb']:
                     wandb.log({"train loss": loss.item()})
@@ -144,11 +116,10 @@ def main():
                 inputs, labels = data['image'], data['annotations']
                 inputs, labels = inputs.to(device), labels.to(device)
 
-                # image_features = model.get_image_features(inputs)
-                # outputs = model.visual_projection(image_features)
                 outputs = model(inputs)
+                outputs = torch.mean(outputs, dim=1)
 
-                loss = criterion(outputs, labels)
+                loss = criterion_val(outputs, labels)
                 val_loss_r2.append(loss.item())
                 pred_list.append(outputs)
                 target_list.append(labels)

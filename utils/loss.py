@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import platform
 
 
 def dis_2_score(dis, return_numpy=True):
@@ -16,6 +17,15 @@ def dis_2_score(dis, return_numpy=True):
         return score.cpu().numpy()
     else:
         return score
+
+def base_emd_loss(x, y_true, dist_r=2):
+    cdf_x = torch.cumsum(x, dim=-1)
+    cdf_ytrue = torch.cumsum(y_true, dim=-1)
+    if dist_r == 2:
+        samplewise_emd = torch.sqrt(torch.mean(torch.pow(cdf_ytrue - cdf_x, 2), dim=-1))
+    else:
+        samplewise_emd = torch.mean(torch.abs(cdf_ytrue - cdf_x), dim=-1)
+    return samplewise_emd
 
 
 class emd_loss(torch.nn.Module):
@@ -55,6 +65,32 @@ class emd_loss(torch.nn.Module):
             y_true_mean = torch.mean(y_true * rate_scale, dim=-1)
             l1loss = torch.mean(torch.abs(x_mean - y_true_mean))
             loss += l1loss * self.l1loss_coef
+        return loss
+
+
+class MPEMDLoss(torch.nn.Module):
+    def __init__(self, dist_r=2, eps=1e-6, beta=0.7, k=1.2):
+        super(MPEMDLoss, self).__init__()
+        self.dist_r = dist_r
+        self.eps = eps
+        self.beta = beta
+        self.k = k
+        self.emd = base_emd_loss
+        # if system is linux, compile the emd loss
+        if platform.system() == 'Linux':
+            self.emd = torch.compile(base_emd_loss)
+
+    def forward(self, x, y_true):
+        patch_num = x.size(1)
+        x_flatten = x.view(-1, x.size(-1))
+        # copy y_true patch_num times at dim 1
+        y_true_flatten = y_true.repeat(1, patch_num).view(-1, y_true.size(-1))
+        loss = self.emd(x_flatten, y_true_flatten)
+        loss = loss.contiguous().view(-1, patch_num)
+        eps = torch.ones_like(loss) * self.eps
+        emdc = torch.max(eps, 1 - self.k * loss)
+        weight = 1 - torch.pow(emdc, self.beta)
+        loss = torch.mean(loss * weight)
         return loss
 
 
@@ -143,3 +179,10 @@ class SupCRLoss(torch.nn.Module):
             loss = loss_positives + loss_negatives
 
         return loss
+
+
+if __name__ == "__main__":
+    emd = MPEMDLoss()
+    x = torch.rand(32, 5, 10)
+    y = torch.rand(32, 5, 10)
+    loss = emd(x, y)
