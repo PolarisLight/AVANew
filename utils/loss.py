@@ -69,13 +69,14 @@ class emd_loss(torch.nn.Module):
 
 
 class MPEMDLoss(torch.nn.Module):
-    def __init__(self, dist_r=2, eps=1e-6, beta=0.7, k=1.2):
+    def __init__(self, dist_r=2, eps=1e-6, beta=0.7, k=1.2,norm=False):
         super(MPEMDLoss, self).__init__()
         self.dist_r = dist_r
         self.eps = eps
         self.beta = beta
         self.k = k
         self.emd = base_emd_loss
+        self.norm = norm
         # if system is linux, compile the emd loss
         if platform.system() == 'Linux':
             self.emd = torch.compile(base_emd_loss)
@@ -90,6 +91,9 @@ class MPEMDLoss(torch.nn.Module):
         eps = torch.ones_like(loss) * self.eps
         emdc = torch.max(eps, 1 - self.k * loss)
         weight = 1 - torch.pow(emdc, self.beta)
+        if self.norm:
+            # normalize the weight
+            weight = weight / torch.sum(weight, dim=1, keepdim=True)
         loss = torch.mean(loss * weight)
         return loss
 

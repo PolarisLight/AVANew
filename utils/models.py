@@ -3,6 +3,7 @@ import torchvision
 import torch.nn as nn
 from transformers import CLIPProcessor, CLIPModel, CLIPVisionModel, CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPVisionTransformer
+import math
 
 
 class AesClip(nn.Module):
