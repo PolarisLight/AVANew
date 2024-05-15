@@ -69,7 +69,7 @@ class CustomCLIPEncoderLayerIn(CLIPEncoderLayer):
                 hidden_states,
                 hidden_states
             )
-            cross_attention_outputs = self.layer_norm3(cross_attention_outputs)
+            # cross_attention_outputs = self.layer_norm3(cross_attention_outputs)
             # 将跨注意力的输出与自注意力的输出相加
             hidden_states = hidden_states + cross_attention_outputs
 
